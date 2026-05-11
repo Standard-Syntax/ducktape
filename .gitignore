@@ -1,0 +1,42 @@
+# Generated and session artifacts
+.grepai/
+
+# Context gate events (runtime log, not source)
+.opencode/context-gate-events.jsonl
+
+# Local machine config (never commit this)
+opencode.json
+
+# Backup files
+*.bak.*
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

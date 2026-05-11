@@ -4,6 +4,12 @@
 **Audience:** Architects and engineers building Python 3.13 agent pipelines in the opencode harness  
 **Status:** Proposed
 
+> **⚠️ HISTORICAL DOCUMENT — SUPERSEDED**
+> This document was an early input to planning. It has been superseded by `specs/event-driven-agent-runtime-plan.md`, which is the authoritative controlling plan.
+> Where conflicts exist between this document and the controlling plan, the controlling plan takes precedence.
+> In particular: `messageCreated`, `session.idle`, and other stale event names in this document are **not** verified implementation guidance.
+> Always cross-reference the controlling plan before acting on this document's recommendations.
+
 ---
 
 > The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
@@ -214,30 +220,17 @@ Every significant agent lifecycle event is observable through the opencode plugi
 
 | opencode hook | Event produced | Destination layer |
 |---------------|---------------|------------------|
-| `sessionCreated` | `session.started` | Layer 3 (durable) |
-| `messageCreated` | `message.received` | Layer 2 (in-process) |
-| `toolExecuted` | `tool.completed` or `tool.failed` | Layer 2 |
+| `session.created` | `session.started` | Layer 3 (durable) |
+| ~~`messageCreated`~~ ⚠️ UNVERIFIED | ~~`message.received`~~ ⚠️ UNVERIFIED | Layer 2 (in-process) — **superseded; use verified `session.created` events only** |
+| `tool.execute.after` | `tool.completed` or `tool.failed` | Layer 2 |
 | `permission.asked` | `hitl.approval.requested` | Layer 3 (durable — waits for human) |
-| `experimental.session.compacting` | `context.compacting` | Layer 3 (checkpoint trigger) |
+| `session.compacted` | `context.compacting` | Layer 3 (checkpoint trigger) |
 
-### 5.2 `promptAsync` for non-blocking agent dispatch
+### 5.2 Non-blocking agent dispatch
 
-The opencode SDK's `promptAsync` method (POST to `/session/{sessionID}/prompt_async`, returns HTTP 204 immediately) MUST be used for all inter-agent dispatches where the caller doesn't need to block on the result. Use `prompt` (streaming, synchronous) only when the caller needs the response before it can proceed.
+**[UNVERIFIED]** Earlier non-blocking SDK method and endpoint names in this section were not verified in opencode docs and MUST NOT be used in implementation.
 
-```python
-# Non-blocking: fire and subscribe to events for completion
-await client.session.prompt_async(
-    session_id=worker_session_id,
-    agent="rpiv-implementer",
-    parts=[TextPartInput(text=task_prompt)]
-)
-
-# Watch for completion via event subscription
-async for event in client.event.subscribe():
-    if event.type == "session.status" and event.properties.status.type == "idle":
-        if event.session_id == worker_session_id:
-            break
-```
+For non-blocking dispatch, use verified `session.prompt` with event-subscription for completion detection, or use opencode commands with `subtask: true` for parallel agent fan-out.
 
 ### 5.3 `subtask` configuration for parallelism
 
@@ -267,12 +260,12 @@ opencode's `subtask: true` command flag forces a command to run in a separate se
 
 ### 5.4 Compaction hook as checkpoint trigger
 
-The `experimental.session.compacting` hook fires before opencode compresses the session context. This MUST trigger a checkpoint write to the durable event log. On recovery, agents replay events from the last checkpoint rather than starting cold.
+The `session.compacted` hook fires before opencode compresses the session context. This MUST trigger a checkpoint write to the durable event log. On recovery, agents replay events from the last checkpoint rather than starting cold.
 
 ```typescript
 // opencode plugin (TypeScript)
 export const CheckpointPlugin = async (ctx) => ({
-  "experimental.session.compacting": async (input, output) => {
+  "session.compacted": async (input, output) => {
     await writeCheckpoint({
       sessionId: input.session.id,
       stage: getCurrentStage(),
@@ -724,23 +717,19 @@ async function forward(event: object): Promise<void> {
 }
 
 export const BridgePlugin: Plugin = async ({ project }) => ({
-  async sessionCreated(session) {
-    await forward({ event_type: "session.started", producer_id: session.id,
-                    payload: { project_id: project.id } })
-  },
-  async toolExecuted(tool) {
-    await forward({ event_type: "tool.completed", producer_id: tool.sessionId,
-                    payload: { name: tool.name, result: tool.result } })
-  },
   async event({ event }) {
+    if (event.type === "session.created") {
+      await forward({ event_type: "session.started", producer_id: event.sessionId,
+                      payload: { project_id: project.id } })
+    }
+    if (event.type === "tool.execute.after") {
+      await forward({ event_type: "tool.completed", producer_id: event.sessionId,
+                      payload: { name: event.toolName, result: event.result } })
+    }
     if (event.type === "permission.asked") {
       await forward({ event_type: "hitl.approval.requested",
                       producer_id: "opencode",
                       payload: { opencode_permission_id: event.properties.id } })
-    }
-    if (event.type === "session.status" && event.properties.status.type === "idle") {
-      await forward({ event_type: "session.idle", producer_id: "opencode",
-                      payload: { status: "idle" } })
     }
   },
 })
@@ -755,7 +744,7 @@ export const BridgePlugin: Plugin = async ({ project }) => ({
 ### Phase 0 — Prerequisites (1–2 days)
 
 - [ ] Audit `stk` envelope schema; document extension points for `event_id`, `event_type`, `stage`, and `correlation_id`.
-- [ ] Confirm opencode SDK version supports `promptAsync` and `client.event.subscribe()`.
+- [ ] Confirm opencode SDK version supports verified event hooks and `client.event.subscribe()`.
 - [ ] Create `agent_runtime/` package skeleton with `uv init`.
 - [ ] Write Pydantic v2 event models (`AgentEvent` and typed subtypes).
 
@@ -763,7 +752,7 @@ export const BridgePlugin: Plugin = async ({ project }) => ({
 
 ### Phase 1 — Layer 1 integration: opencode plugin hooks (2–3 days)
 
-- [ ] Implement opencode plugin in TypeScript that forwards `sessionCreated`, `toolExecuted`, `permission.asked`, and `experimental.session.compacting` hooks to a local HTTP endpoint on the Python orchestrator.
+- [ ] Implement opencode plugin in TypeScript that forwards `session.created`, `tool.execute.after`, `permission.asked`, and `session.compacted` hooks to a local HTTP endpoint on the Python orchestrator.
 - [ ] Implement the Python HTTP receiver that deserialises incoming hooks into `AgentEvent` instances and publishes them to the Layer 2 async bus.
 - [ ] Wire `permission.asked` hook to the HITL approval queue (Layer 3).
 
@@ -773,7 +762,7 @@ export const BridgePlugin: Plugin = async ({ project }) => ({
 
 - [ ] Implement `AsyncEventBus` with `subscribe` and `publish`.
 - [ ] Implement `fan_out` with semaphore-bounded concurrency.
-- [ ] Replace blocking `prompt` calls in the RPIV Implementer with `promptAsync` + event-subscription completion detection.
+- [ ] Replace blocking `prompt` calls in the RPIV Implementer with verified non-blocking patterns and event-subscription completion detection.
 - [ ] Add DLQ routing table; implement per-failure-class handlers.
 
 **Exit criterion:** The Implementer can dispatch three concurrent subtasks and handle one simulated `schema_violation` failure by routing it to the Validator critic.
@@ -781,7 +770,7 @@ export const BridgePlugin: Plugin = async ({ project }) => ({
 ### Phase 3 — Layer 3 durable event log and checkpointing (2–3 days)
 
 - [ ] Implement `DurableEventLog` (SQLite).
-- [ ] Implement checkpoint write on `experimental.session.compacting`.
+- [ ] Implement checkpoint write on `session.compacted`.
 - [ ] Implement checkpoint-based recovery: on orchestrator restart, replay from last checkpoint.
 - [ ] Implement `IdempotencyGuard` for git operations and file writes.
 
@@ -910,7 +899,7 @@ This amendment adjusts the EDA plan to account for MiniMax M2.7 as the primary m
 | NL2Repo: 39.8% | Artificial Analysis | Planner stage: new codebase decomposition | Escalate ambiguous repo-structure tasks |
 | Terminal Bench 2: 57.0% vs GPT-5.4's 75.1% | Serenities AI | Shell agent tasks in Implement | Compensate with richer tool schemas |
 | 3.3x output verbosity (87M tokens vs 26M median) | Artificial Analysis | Context overflow, high token cost | Aggressive compaction; `prune: true` |
-| 47 t/s, 2.91s TTFT | Artificial Analysis | Interactive / inline latency unusable | Use `promptAsync` exclusively; never block |
+| 47 t/s, 2.91s TTFT | Artificial Analysis | Interactive / inline latency unusable | Use verified non-blocking dispatch; never block |
 | No multimodal | All sources | Validator can't diff images/design specs | Route visual tasks to Claude or separate tool |
 | BridgeBench regression (12th → 19th) | Artificial Analysis | Cross-service integration work | Test integration tasks against Claude first |
 | "Modified-MIT" license — commercial use restricted | Multiple sources | Production commercial deployment risk | Internal / non-commercial use is fine; review before productizing |
@@ -967,9 +956,9 @@ M2.7 produces 3.3x more output tokens than the peer-model median. Without mitiga
 
 `reserved: 15000` gives the compaction agent enough headroom to run before M2.7's reasoning chain overflows the window. The default of `10000` is insufficient for a reasoning-only model generating 3.3x tokens.
 
-### A3.2 Latency — `promptAsync` everywhere
+### A3.2 Latency — non-blocking dispatch everywhere
 
-M2.7's 2.91s TTFT rules out any synchronous, blocking prompt pattern. Every inter-agent call MUST use `promptAsync`. This is already the plan's recommendation (section 5.2), but it becomes non-negotiable with M2.7 as the primary model.
+M2.7's 2.91s TTFT rules out any synchronous, blocking prompt pattern. Use verified non-blocking dispatch patterns (see section 5.2) for all inter-agent calls. Implementation MUST use verified opencode APIs only.
 
 ### A3.3 Context creep — prune tool outputs
 
@@ -1015,7 +1004,7 @@ The model ran 100+ iterations of `analyze failure trajectories → plan changes 
 
 ### The structural insight: opencode's compaction hook IS the memory write
 
-The `experimental.session.compacting` hook fires every time M2.7's context approaches the window limit. This is structurally equivalent to the "end of iteration" event in M2.7's self-evolution loop. The plan already uses this hook for checkpoint writes (section 5.4). The amendment extends it to also write a **skill evolution log** in M2.7's native format.
+The `session.compacted` hook fires every time M2.7's context approaches the window limit. This is structurally equivalent to the "end of iteration" event in M2.7's self-evolution loop. The plan already uses this hook for checkpoint writes (section 5.4). The amendment extends it to also write a **skill evolution log** in M2.7's native format.
 
 ```
 Each compaction event → one iteration of the self-evolution loop
@@ -1145,7 +1134,7 @@ function loadEvolutionContext(skillName: string, n = 5): string {
 }
 
 export const EvolutionCompactionPlugin: Plugin = async ({ project }) => ({
-  "experimental.session.compacting": async (input, output) => {
+  "session.compacted": async (input, output) => {
     // 1. Inject prior evolution history into the compaction context
     // so M2.7 carries forward what it learned in prior sessions.
     const skillName = (input as any).agent ?? "rpiv-implementer"
@@ -1279,94 +1268,9 @@ This is self-modification with guardrails — not unconstrained rewriting. The h
 
 ## A6. opencode configuration for M2.7
 
-```jsonc
-// opencode.jsonc — M2.7-optimized configuration
-{
-  "$schema": "https://opencode.ai/config.json",
+**[SUPERSEDED]** This section is superseded by `specs/event-driven-agent-runtime-plan.md`. The authoritative MiniMax direct provider configuration is documented there.
 
-  // Primary model: M2.7 via OpenRouter (or MiniMax API directly)
-  "model": "openrouter/minimax/minimax-m2.7",
-
-  // Small model: Claude Haiku for lightweight tasks (auto-summaries, quick lookups).
-  // M2.7 is a reasoning-only model that emits 3.3x the median token count even on
-  // trivial prompts — using it as the small_model would burn reasoning budget on work
-  // that doesn't need it.
-  "small_model": "anthropic/claude-haiku-4-5",
-
-  "compaction": {
-    // Must be true: M2.7 burns 3.3x tokens; context overflow is frequent.
-    "auto": true,
-    // Must be true: prune old tool outputs to conserve the active window.
-    "prune": true,
-    // 15,000 tokens reserved — higher than the default 10,000 to
-    // accommodate M2.7's extended reasoning chain during compaction.
-    "reserved": 15000
-  },
-
-  "agent": {
-    // Orchestrator: M2.7 handles coordination; stable role identity is a strength.
-    "rpiv-orchestrator": {
-      "model": "openrouter/minimax/minimax-m2.7",
-      "mode": "primary",
-      "permission": {
-        "task": {
-          "*": "deny",
-          "rpiv-*": "allow",
-          "rpiv-validator": "ask"
-        }
-      }
-    },
-
-    // Locator: route to Claude — M2.7 regressed on τ²-Bench (multi-turn tool coordination).
-    "rpiv-locator": {
-      "model": "anthropic/claude-sonnet-4-6",
-      "mode": "primary"
-    },
-
-    // Analyst: M2.7's 34% hallucination rate (lower than Sonnet 4.6) makes it
-    // suitable for research synthesis. Escalation handled by orchestrator routing.
-    "rpiv-analyst": {
-      "model": "openrouter/minimax/minimax-m2.7",
-      "mode": "primary"
-    },
-
-    // Planner: M2.7 for well-defined specs; clarification gate before start.
-    "rpiv-planner": {
-      "model": "openrouter/minimax/minimax-m2.7",
-      "mode": "primary"
-    },
-
-    // Implementer: M2.7's strongest area (SWE-bench 78%, Terminal Bench 57%).
-    "rpiv-implementer": {
-      "model": "openrouter/minimax/minimax-m2.7",
-      "mode": "primary"
-    },
-
-    // Validator: Claude — integration tests, security depth, visual diff.
-    "rpiv-validator": {
-      "model": "anthropic/claude-sonnet-4-6",
-      "mode": "primary"
-    },
-
-    // Evolution agent: M2.7 reviewing its own skill files between sessions.
-    "rpiv-self-evolution": {
-      "model": "openrouter/minimax/minimax-m2.7",
-      "mode": "primary",
-      "permission": {
-        "write": {
-          ".opencode/skills/**": "ask"  // Always ask before modifying skill files.
-        }
-      }
-    }
-  },
-
-  // Subtask commands: Implementer subtasks always spawn as isolated sessions.
-  "command": {
-    "implement-task": { "subtask": true },
-    "evolve-skill": { "subtask": true }
-  }
-}
-```
+For reference, the old OpenRouter MiniMax slug has been removed. MiniMax M2.7 uses the direct Token Plan API via the `@ai-sdk/openai-compatible` provider with base URL `https://api.minimax.io/v1` and model ID `MiniMax-M2.7`.
 
 ---
 
@@ -1376,7 +1280,7 @@ These tasks MUST be inserted into the existing phases. They are additive — the
 
 ### Phase 0 additions
 
-- [ ] Confirm M2.7 availability via OpenRouter (`openrouter/minimax/minimax-m2.7`); verify API key and rate limits.
+- [ ] Confirm M2.7 availability via MiniMax direct Token Plan API (`MiniMax-M2.7`); verify `MINIMAX_API_KEY` and rate limits.
 - [ ] Run Kilo.ai's three-task benchmark (bug debug, security review, greenfield build) on M2.7 against a real RPIV task to establish a project-specific quality baseline before relying on published benchmarks.
 - [ ] Review MiniMax "Modified-MIT" license terms against the intended use case. Confirm non-commercial / internal use is within scope.
 
@@ -1427,9 +1331,9 @@ These tasks MUST be inserted into the existing phases. They are additive — the
 
 **Status:** Proposed
 
-**Context:** M2.7's self-evolution mechanism uses a three-component harness: short-term memory (markdown file written after each iteration), self-criticism (structured self-evaluation), and self-optimization (next iteration reads prior memory chain). MiniMax ran this for 100+ iterations within a 24-hour window to achieve a 30% performance improvement. opencode fires `experimental.session.compacting` each time M2.7's context approaches the window limit. These events are structurally equivalent: both mark the boundary of one "iteration" and the beginning of the next.
+**Context:** M2.7's self-evolution mechanism uses a three-component harness: short-term memory (markdown file written after each iteration), self-criticism (structured self-evaluation), and self-optimization (next iteration reads prior memory chain). MiniMax ran this for 100+ iterations within a 24-hour window to achieve a 30% performance improvement. opencode fires `session.compacted` each time M2.7's context approaches the window limit. These events are structurally equivalent: both mark the boundary of one "iteration" and the beginning of the next.
 
-**Decision:** Treat each `experimental.session.compacting` event as one iteration of M2.7's self-evolution loop. The compaction plugin MUST produce a structured compaction summary in M2.7's self-evolution format (§A5.2). The orchestrator MUST parse this summary and append it to the `SkillEvolutionLog`. The next session MUST receive the last N iterations as context before starting work.
+**Decision:** Treat each `session.compacted` event as one iteration of M2.7's self-evolution loop. The compaction plugin MUST produce a structured compaction summary in M2.7's self-evolution format (§A5.2). The orchestrator MUST parse this summary and append it to the `SkillEvolutionLog`. The next session MUST receive the last N iterations as context before starting work.
 
 **Consequences:** Positive: zero additional infrastructure; self-evolution emerges from the compaction lifecycle already required for M2.7's token verbosity. Negative: compaction events are bounded by context window size — a very efficient session may compact infrequently, producing fewer evolution iterations per wall-clock hour. Neutral: the evolution log accumulates indefinitely; add a pruning policy if log files exceed a practical size.
 
@@ -1971,7 +1875,7 @@ def write_artifact(
 ```jsonc
 // Add to opencode.jsonc agent section:
 "rpiv-context7": {
-  "model": "openrouter/minimax/minimax-m2.7",
+  "model": "MiniMax-M2.7",  // Direct MiniMax Token Plan API
   "mode": "subagent",
   "hidden": true,  // only invokable by rpiv-analyst and rpiv-planner
   "description": "Retrieves library documentation via Context7 MCP",
@@ -2182,7 +2086,7 @@ Respond ONLY as a JSON object with these exact keys:
     response = await client.session.prompt(
         session_id=session_id,
         agent="rpiv-orchestrator",
-        format="json",   # opencode structured output format
+        format={"type": "json_schema", "schema": IterationMemory.model_json_schema()},
         parts=[{"type": "text", "text": extraction_prompt}],
     )
     data = json.loads(response.parts[0].text)

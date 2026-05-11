@@ -1,0 +1,42 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "grepai": {
+      "type": "local",
+      "command": [
+        "grepai",
+        "mcp-serve",
+        "<workspace-path>"
+      ],
+      "enabled": true,
+      "timeout": 10000
+    },
+    "probe": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@probelabs/probe@latest",
+        "mcp"
+      ],
+      "enabled": true,
+      "timeout": 10000
+    }
+  },
+  "watcher": {
+    "ignore": [
+      "node_modules/**",
+      "dist/**",
+      "build/**",
+      "target/**",
+      ".git/**",
+      ".grepai/**",
+      ".venv/**",
+      "venv/**",
+      "__pycache__/**",
+      ".pytest_cache/**",
+      ".mypy_cache/**",
+      ".ruff_cache/**"
+    ]
+  }
+}
