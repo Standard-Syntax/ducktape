@@ -1,187 +1,222 @@
 # Task
-fix issues from review team
+fix findings 1 and 2
 
 # Context tool plan
-- grepai: skipped — review findings identify exact files and strings.
-- Probe: skipped — no Python source symbols or call sites are involved.
-- rg/rga: used — exact checks for provider wording, stale event names, ignore behavior, and local config.
-- ast-grep: skipped — no structural code refactor.
-- Context7: skipped — opencode provider shape was already verified in Phase 0; this task fixes local consistency issues.
-- Exa: skipped — no external evidence needed.
+- grepai: skip — review findings identify exact files and symbols.
+- Probe: use — editing existing `AgentEvent.model_validate`, `validate_event`, and package/spec references.
+- rg/rga: use — exact checks for `validate_event`, stale `borrow`, `schemaVersion`, and structured error wording; rga not needed because no PDFs/archives are involved.
+- ast-grep: skip — targeted edits, no structural codemod.
+- Context7: skip — Pydantic behavior was reproduced locally and no dependency API uncertainty remains.
+- Exa: skip — no external evidence needed.
 
 # Context findings
 ## grepai
-- Skipped. Exact files are known from review: `.gitignore`, `opencode.json`, `specs/event-driven-agent-runtime-plan.md`, `eda-multi-agent-plan.md`, and `tests/test_phase0_plan.py`.
+- Skipped. The code review identified exact paths and symbols.
 
 ## Probe
-- Skipped. No symbols/functions/classes are being edited.
+- `agent_runtime/events.py` defines `AgentEvent.model_validate()` at lines 88-93. It already forwards `**kwargs` to `_event_adapter.validate_python(obj, **kwargs)` when `cls is AgentEvent`.
+- `agent_runtime/events.py` defines `validate_event(data: Any) -> SessionCreatedEvent` at lines 131-204. It manually pre-validates dict/event_type/deprecated names, then calls `_event_adapter.validate_python(data)` without accepting or forwarding kwargs.
+- `validate_event` is documented as the canonical entrypoint, so it should not be less capable than `AgentEvent.model_validate` for supported Pydantic validation kwargs.
 
 ## rg/rga
-- `specs/event-driven-agent-runtime-plan.md:24` still says `Exact opencode provider config remains Phase 0 validation` even though line 37 says the MiniMax provider config is verified and line 45 says opencode provider shape is verified.
-- `specs/event-driven-agent-runtime-plan.md:189` lists planned future source file `.opencode/plugins/event-forwarder.ts`.
-- `.gitignore:3` currently ignores all `.opencode/`.
-- `git check-ignore -v .opencode/plugins/event-forwarder.ts .opencode/skills/example/SKILL.md opencode.json || true` reports `.opencode/plugins/event-forwarder.ts` and `.opencode/skills/example/SKILL.md` ignored by `.gitignore:3`; `opencode.json` is not ignored.
-- `opencode.json:6-10` contains a machine-local absolute path `/home/dscv/Repo/ducktape`.
-- `eda-multi-agent-plan.md:734-738` still contains a runnable `session.idle` forwarding block inside a TypeScript code fence.
+- `tests/test_events.py:257-278` covers `AgentEvent.model_validate(data, extra="allow")`, but no test covers `validate_event(data, extra="allow")`.
+- Runtime repro before this task: `validate_event(data, extra="allow")` raises `TypeError: validate_event() got an unexpected keyword argument 'extra'`.
+- `agent_runtime/__init__.py:8-10` points to `specs/event-driven-agent-runtime-plan.md` as the authoritative field list.
+- `specs/event-driven-agent-runtime-plan.md:60` says events can borrow `stk` conventions such as `schemaVersion` and structured error fields.
+- `specs/event-driven-agent-runtime-plan.md:295` says agent events borrow `schemaVersion` and structured error fields while adding event-specific fields.
+- `specs/event-driven-agent-runtime-plan.md:447` phrases AC-008 around envelopes borrowing from `stk` conventions.
 
 ## ast-grep
-- Skipped. No syntax-aware rewrite needed.
+- Skipped. No structural rewrite planned.
 
 ## Context7 / Exa
-- Skipped. Existing Phase 0 evidence already records the verified MiniMax provider shape.
+- Skipped. No external documentation needed.
 
 # Acceptance criteria
-- [x] AC-001: `.gitignore` must not blanket-ignore `.opencode/`; planned source paths `.opencode/plugins/event-forwarder.ts` and `.opencode/skills/example/SKILL.md` must not be ignored by normal git ignore rules.
-- [x] AC-002: Local `opencode.json` must be protected from accidental commit or made portable. Preferred minimal fix: ignore root `opencode.json` and add a portable `opencode.json.example` without absolute local paths or secrets.
-- [x] AC-003: The controlling plan must no longer say exact opencode provider config remains Phase 0 validation after T00-007 is checked and Q1 is resolved.
-- [x] AC-004: The superseded plan must not contain runnable fenced code blocks that forward or branch on `session.idle`.
+- [ ] AC-001: `validate_event()` accepts supported Pydantic validation kwargs and forwards them to `_event_adapter.validate_python()`, matching `AgentEvent.model_validate()` behavior for `extra="allow"`.
+- [ ] AC-002: A focused regression test fails before implementation and passes after implementation for `validate_event(data, extra="allow")`.
+- [ ] AC-003: `specs/event-driven-agent-runtime-plan.md` no longer says agent event envelopes borrow `stk` `schemaVersion` or structured error fields; it states the event envelope is distinct and uses the implemented event fields.
+- [ ] AC-004: Existing event behavior remains intact; focused tests, full tests with injected deps, ruff, and type checking pass or known environment-only warnings are documented.
 
 # Files to modify
-- `.gitignore`
-- `opencode.json.example` (create if using local-config template approach)
+- `agent_runtime/events.py`
+- `tests/test_events.py`
 - `specs/event-driven-agent-runtime-plan.md`
-- `eda-multi-agent-plan.md`
-- `tests/test_phase0_plan.py`
-- `.opencode/loop-task.md` (audit/state only)
+- `.opencode/loop-task.md` (audit trail only)
 
 # Files explicitly out of scope
 - `pyproject.toml` unless dependency/config change is explicitly approved
 - `uv.lock` unless dependency/config change is explicitly approved
-- `opencode.json` local machine config unless choosing to make it portable instead of ignoring it
-- `.grepai/**`
-- `.opencode/context-gate-events.jsonl`
-- production runtime files such as `agent_runtime/**`
+- generated files unless explicitly required
+- `agent_runtime/__pycache__/` and `.pytest_cache/`
 
 # Code context
-## `.gitignore`
-```gitignore
-# Generated and session artifacts
-.grepai/
-.opencode/
+Current `AgentEvent.model_validate()`:
 
-# Context gate events (runtime log, not source)
-.opencode/context-gate-events.jsonl
+```python
+@classmethod
+def model_validate(cls, obj: Any, **kwargs: Any) -> "AgentEvent":
+    """Discriminated-union entrypoint: returns SessionCreatedEvent for session.created."""
+    if cls is AgentEvent:
+        return _event_adapter.validate_python(obj, **kwargs)
+    return super().model_validate(obj, **kwargs)
 ```
 
-## Current ignore behavior
-```text
-.gitignore:3:.opencode/    .opencode/plugins/event-forwarder.ts
-.gitignore:3:.opencode/    .opencode/skills/example/SKILL.md
+Current `validate_event()`:
+
+```python
+def validate_event(data: Any) -> SessionCreatedEvent:
+    """Validate a raw event dictionary and return the typed event model.
+
+    This is the canonical entrypoint for event validation (AC-005).  It
+    validates the ``event_type`` field and rejects unknown event types with
+    a ``pydantic.ValidationError``.
+
+    The deprecated ``sessionCreated`` name is explicitly rejected.
+    Non-dict inputs raise ``ValidationError``, not ``TypeError``.
+    """
+    # Guard against non-dict inputs: must raise ValidationError, not TypeError
+    if data is None or not isinstance(data, dict):
+        raise ValidationError.from_exception_data(...)
+
+    if "event_type" not in data:
+        raise ValidationError.from_exception_data(...)
+
+    raw_event_type = data["event_type"]
+    if not isinstance(raw_event_type, str):
+        raise ValidationError.from_exception_data(...)
+    event_type: str = raw_event_type
+
+    if event_type == "sessionCreated":
+        raise ValidationError.from_exception_data(...)
+
+    return _event_adapter.validate_python(data)
 ```
 
-## `opencode.json`
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "grepai": {
-      "type": "local",
-      "command": [
-        "grepai",
-        "mcp-serve",
-        "/home/dscv/Repo/ducktape"
-      ],
-      "enabled": true,
-      "timeout": 10000
-    }
-  }
-}
+Current test coverage around kwargs:
+
+```python
+class TestModelValidateKwargsForwarding:
+    def test_agent_event_model_validate_forwards_extra_allow(self) -> None:
+        data = _valid_session_created_dict()
+        data["extra_field"] = "extra_value"
+
+        concrete = SessionCreatedEvent.model_validate(data, extra="allow")
+        assert isinstance(concrete, SessionCreatedEvent)
+        assert concrete.model_extra is not None
+        assert concrete.model_extra["extra_field"] == "extra_value"
+
+        event = AgentEvent.model_validate(data, extra="allow")
+        assert isinstance(event, SessionCreatedEvent)
+        assert event.model_extra is not None
+        assert event.model_extra["extra_field"] == "extra_value"
 ```
 
-## Provider wording conflict
+Current stale spec snippets:
+
 ```markdown
-| Use MiniMax direct Token Plan API. | MiniMax docs verify model `MiniMax-M2.7`, base URL `https://api.minimax.io/v1`, and env var `MINIMAX_API_KEY`. | Remove OpenRouter as the primary provider path. Exact opencode provider config remains Phase 0 validation. |
-```
+The event schema should be separate from `stk` command results. It can borrow `stk` conventions such as `schemaVersion` and structured error fields, but it needs event-specific fields including `event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, and `payload`.
 
-## `session.idle` code block
-```typescript
-// ⚠️ UNVERIFIED: session.idle event not verified in opencode docs
-// This event type is superseded; do not use in implementation without verification
-if (event.type === "session.status" && event.properties.status.type === "idle") {
-  await forward({ event_type: "session.idle", producer_id: "opencode", // eslint-disable-line no-unused-vars
-                  payload: { status: "idle" } })
-}
-```
+Agent event envelopes are **not** `stk` command-result envelopes. Agent events borrow some conventions (`schemaVersion`, structured error fields) but add event-specific fields: `event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, and `payload`.
 
-## Current tests
-- `tests/test_phase0_plan.py` checks stale names in line context, but it does not fail on stale names inside fenced code when nearby comments contain `unverified`/`superseded`.
-- `tests/test_phase0_plan.py` currently requires `.opencode/`, which conflicts with planned source files under `.opencode/plugins/`.
+- AC-008: WHEN an event envelope borrows from `stk` conventions, THE SYSTEM SHALL distinguish it from `stk` command-result envelopes.
+```
 
 # Test file path
-- `tests/test_phase0_plan.py`
+- `tests/test_events.py`
 
 # Latest verification result
-- `py-tester` returned TESTS_READY.
-- RED command: `uv run pytest tests/test_phase0_plan.py -v`.
-- New failures: 9 failed, 2 passed, 28 deselected for focused review-fix tests.
-- Failing coverage maps to AC-001 through AC-004:
-  - `.opencode/plugins/event-forwarder.ts` and `.opencode/skills/example/SKILL.md` are currently ignored.
-  - `opencode.json` is not ignored and `opencode.json.example` does not exist.
-  - stale provider phrase remains in controlling plan.
-  - `session.idle` remains in a fenced code block.
-- Tester tracked file gate: `/tmp/tester-new-files.txt` empty; no tracked non-test file added by tester.
-- `py-implementer` reported GREEN:
-  - `uv run pytest tests/test_phase0_plan.py -v` => 39 passed.
-  - `uv run ruff check .` => passed.
-  - `uv run ty check .` => passed.
-  - `uv run pytest -v` => 39 passed.
-- Orchestrator local verification:
-  - `uv run pytest tests/test_phase0_plan.py -v` => 39 passed.
-  - `git check-ignore -v .opencode/plugins/event-forwarder.ts .opencode/skills/example/SKILL.md opencode.json .opencode/context-gate-events.jsonl || true` shows only `opencode.json` and `.opencode/context-gate-events.jsonl` ignored.
-  - `.gitignore` now ignores `.opencode/context-gate-events.jsonl` and `opencode.json`, not `.opencode/`.
-  - `opencode.json.example` exists and uses `<workspace-path>`.
-  - `specs/event-driven-agent-runtime-plan.md:24` now says provider config is verified in Phase 0 Design Lock.
-  - `eda-multi-agent-plan.md` no longer has the `session.idle` TypeScript block.
+- Pre-task focused tests: `uv run --with pydantic --with pytest python -m pytest tests/test_events.py -q` => 56 passed.
+- Pre-task full tests: `uv run --with pydantic --with pytest python -m pytest -q` => 95 passed.
+- Pre-task ruff: `uv run --with pydantic --with ruff ruff check .` => passed.
+- Pre-task basedpyright focused: `uv run --with pydantic --with pytest --with basedpyright basedpyright agent_runtime tests/test_events.py` => 0 errors, 79 warnings.
+- Pre-task repro: `validate_event(data, extra="allow")` raises `TypeError`.
+- Tester verdict: TESTS_READY.
+- Tester added `TestModelValidateKwargsForwarding::test_validate_event_forwards_extra_allow` in `tests/test_events.py`.
+- RED command: `uv run --with pydantic --with pytest python -m pytest tests/test_events.py -v`.
+- RED result: 1 failed, 56 passed. Failure is `TypeError: validate_event() got an unexpected keyword argument 'extra'`.
+- Tester file gate: required tracked diff gate output was empty; `git status --short` still shows only pre-existing untracked `agent_runtime/` and `tests/test_events.py` plus modified `.opencode/loop-task.md`.
+- Implementer result: GREEN reported.
+- Implementer changed `agent_runtime/events.py` so `validate_event(data: Any, **kwargs: Any)` forwards `_event_adapter.validate_python(data, **kwargs)`.
+- Implementer changed `specs/event-driven-agent-runtime-plan.md` lines 60, 295, and AC-008 to describe agent event envelopes as distinct from `stk` command-result envelopes.
+- Implementer verification reported: focused kwargs tests passed, full suite 96 passed, ruff passed, focused basedpyright 0 errors with warnings.
+- Orchestrator post-implementation exact check still finds `specs/event-driven-agent-runtime-plan.md:23` with phrase `Agent event envelopes may borrow conventions but must not pretend to be stk command results`; critic should decide whether this remains within AC-003 scope.
 
 # Unresolved critic feedback
-- Critic iteration 1 verdict: ACCEPTABLE.
-- Blocking issues: 0.
-- Follow-up only: `tests/test_phase0_plan.py` still has a fragile substring check where REQUIRED_PATTERNS includes `.opencode/` and passes because `.opencode/context-gate-events.jsonl` contains that substring. No behavioral defect; follow-up OK.
+## Critic Feedback — Iteration 1
+
+**Status:** NEEDS WORK
+**Failing criterion:** AC-003
+**Evidence:** `specs/event-driven-agent-runtime-plan.md:23` still says `Agent event envelopes may borrow conventions but must not pretend to be stk command results.` The critic judged this as stale normative permission that contradicts the event envelope design.
+**Required correction:** Replace the line 23 planning-impact wording with language that says agent event envelopes are deliberately distinct from `stk` command-result envelopes, use different fields, and are not interchangeable. Then re-run exact wording checks.
+**Priority:** HIGH
+
+## Implementer Response — Iteration 2
+
+**Status:** FIXED
+**Changed file:** `specs/event-driven-agent-runtime-plan.md`
+**Evidence:** Line 23 now says `Agent event envelopes are deliberately distinct from stk command-result envelopes, use different fields (...), and are not interchangeable.`
+**Exact check:** `grep` still finds `schemaVersion` where the spec factually documents `stk` fields, and `SHALL NOT borrow` in AC-008; no `may borrow` or `borrow conventions` phrase remains.
+
+## Review Finding 1 — validate_event kwargs
+**Status:** REQUEST CHANGES
+**Failing criterion:** AC-001 / AC-002
+**Evidence:** `agent_runtime/events.py:131-204` does not accept kwargs and calls `_event_adapter.validate_python(data)` without forwarding kwargs. Runtime repro raises `TypeError` for `validate_event(data, extra="allow")`.
+**Required correction:** Add `**kwargs` support to `validate_event()` and forward kwargs into `_event_adapter.validate_python(data, **kwargs)`. Add a focused regression test.
+**Priority:** HIGH
+
+## Review Finding 2 — stale authoritative spec wording
+**Status:** REQUEST CHANGES
+**Failing criterion:** AC-003
+**Evidence:** `agent_runtime/__init__.py:8-10` points to `specs/event-driven-agent-runtime-plan.md` as authoritative, while spec lines 60 and 295 still claim agent events borrow `stk` `schemaVersion` and structured error fields.
+**Required correction:** Rewrite those spec statements and AC-008 so event envelopes are described as distinct from `stk` command-result envelopes and limited to implemented event fields.
+**Priority:** MEDIUM
 
 # Tool constraints for subagents
 - `py-tester`: may use read-only local search; may only create/modify test files.
 - `py-implementer`: may use local search; may only edit files listed under "Files to modify".
-- `py-critic`: may use read-only local search; must not edit files.
+- `py-critic`: may use read-only local search; must not edit code.
+
+# Long-task prompt for subagents
+This is a lengthy task. Make full use of the available context window (within 200k tokens total). Complete each part thoroughly before moving on.
 
 # Final loop summary
+
 ## TDD phase
-- TESTS_READY.
-- RED: 9 failed, 2 passed, 28 deselected for the focused review-fix tests.
-- GREEN: `uv run pytest tests/test_phase0_plan.py -v` => 39 passed.
+- Status: TESTS_READY.
+- Tester added `TestModelValidateKwargsForwarding::test_validate_event_forwards_extra_allow`.
+- RED: `uv run --with pydantic --with pytest python -m pytest tests/test_events.py -v` => 1 failed, 56 passed. Failure: `TypeError: validate_event() got an unexpected keyword argument 'extra'`.
+- GREEN: `uv run --with pydantic --with pytest python -m pytest tests/test_events.py -v` => 57 passed.
 
 ## Context tools used
 - grepai: skipped — exact review findings and files were known.
-- Probe: skipped — no Python symbols or implementation references involved.
-- rg/rga: used — exact string and git-ignore checks for provider wording, `session.idle`, `.opencode/`, and `opencode.json`.
+- Probe: used — extracted `AgentEvent.model_validate` and `validate_event` definitions.
+- rg/rga: used — exact checks for `validate_event`, `borrow`, `schemaVersion`, and structured error wording; rga not needed.
 - ast-grep: skipped — no structural rewrite.
-- Context7: skipped — provider shape already verified in Phase 0.
-- Exa: skipped — no external research needed.
+- Context7: skipped — no dependency API uncertainty.
+- Exa: skipped — no external information needed.
 
 ## Critic iterations
-- 1.
-- Verdict: ACCEPTABLE.
-- Blocking issues: 0.
-- Low follow-up: tighten one `.gitignore` test assertion to avoid substring ambiguity.
+- Iteration 1 verdict: NEEDS WORK. Blocking issue: `specs/event-driven-agent-runtime-plan.md:23` still said agent event envelopes may borrow conventions.
+- Iteration 2 verdict: ACCEPTABLE. Blocking issues: 0.
 
 ## Files changed
-- `.gitignore`
-- `opencode.json.example`
-- `specs/event-driven-agent-runtime-plan.md`
-- `eda-multi-agent-plan.md`
-- `tests/test_phase0_plan.py`
-- `.opencode/loop-task.md`
+- `.opencode/loop-task.md`: loop state and audit trail.
+- `agent_runtime/events.py`: `validate_event(data: Any, **kwargs: Any)` now forwards kwargs to `_event_adapter.validate_python(data, **kwargs)`.
+- `tests/test_events.py`: added regression coverage for `validate_event(data, extra="allow")`.
+- `specs/event-driven-agent-runtime-plan.md`: removed stale `stk` borrowing language and clarified agent event envelopes are distinct and non-interchangeable.
 
 ## Final validation
-- `git diff --name-only` => `eda-multi-agent-plan.md` (tracked diff only; other changed artifacts are untracked).
-- `git diff --stat` => `eda-multi-agent-plan.md | 174 +++++++++++-------------------------------------`.
-- `rg "TODO|FIXME|pass|NotImplemented" .` found only existing prose/code-example uses of `pass`, no TODO/FIXME/NotImplemented action markers.
-- `uv run pytest -v` => 39 passed.
-- `uv run ruff check .` => passed.
-- `uv run ty check .` => passed.
-- `git check-ignore -v .opencode/plugins/event-forwarder.ts .opencode/skills/example/SKILL.md opencode.json .opencode/context-gate-events.jsonl || true` => only `opencode.json` and `.opencode/context-gate-events.jsonl` ignored.
+- `git diff --name-only` => `.opencode/loop-task.md`, `specs/event-driven-agent-runtime-plan.md` (tracked diffs only; `agent_runtime/` and `tests/test_events.py` remain untracked in `git status`).
+- `git diff --stat` => 2 tracked files changed, 141 insertions, 147 deletions.
+- `rg "TODO|FIXME|pass|NotImplemented" .` found existing planning-document uses and expected `pass  # expected` in `tests/test_events.py`; no new unresolved TODO/FIXME/NotImplemented markers.
+- Default `uv run pytest -v` fails during collection because the bare environment lacks `pydantic`.
+- Default `uv run ruff check .` passes.
+- Default `uv run ty check .` reports unresolved imports for `pydantic`/`pytest` in the bare environment.
+- Dependency-injected focused tests: `uv run --with pydantic --with pytest python -m pytest tests/test_events.py -v` => 57 passed.
+- Dependency-injected full tests: `uv run --with pydantic --with pytest python -m pytest -v` => 96 passed.
+- Dependency-injected ruff: `uv run --with pydantic --with ruff ruff check .` => passed.
+- Dependency-injected basedpyright: `uv run --with pydantic --with pytest --with basedpyright basedpyright .` => 0 errors, 97 warnings.
 
-## Final impact summary
-- `.opencode/plugins/**` and `.opencode/skills/**` planned source paths are no longer hidden by `.gitignore`.
-- Local `opencode.json` is ignored; portable `opencode.json.example` exists with `<workspace-path>` placeholder.
-- Controlling plan no longer claims provider config remains Phase 0 validation.
-- Superseded plan no longer contains runnable fenced code that forwards or branches on `session.idle`.
+## Final verdict
+Loop complete. All acceptance criteria are satisfied. Critic final verdict: ACCEPTABLE. Remaining default-environment failures are dependency declaration/environment issues already present for Pydantic tests, not behavior regressions from this loop.

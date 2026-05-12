@@ -20,7 +20,7 @@ Planning artifact only. Do not implement production code from this file until Ph
 | Do not use `promptAsync`, `prompt_async`, or `/session/{id}/prompt_async`. | Context7 and official opencode docs did not verify these APIs. | Dispatch design must use verified opencode APIs such as `session.prompt`, `session.command`, and `event.subscribe` where applicable. |
 | Use `subtask: true` only for opencode command/subagent config. | opencode docs verified `subtask: true` command behavior. | Parallel agent launch should be modeled through documented command config, not assumed SDK flags. |
 | Use structured output as JSON schema config, not `format="json"` for SDK calls. | opencode docs verified `format: { type: "json_schema", schema, retryCount? }`; CLI `--format json` is separate. | Structured extraction and validator calls need JSON-schema format objects. |
-| Treat `stk` command envelopes as verified, but define agent events separately. | `/home/dscv/Repo/stk` verifies `schemaVersion: 1`, `ok`, `command`, `data`, `errors`, `warnings`, and `elapsed_ms`. | Agent event envelopes may borrow conventions but must not pretend to be `stk` command results. |
+| Treat `stk` command envelopes as verified, but define agent events separately. | `/home/dscv/Repo/stk` verifies `schemaVersion: 1`, `ok`, `command`, `data`, `errors`, `warnings`, and `elapsed_ms`. | Agent event envelopes are deliberately distinct from `stk` command-result envelopes, use different fields (`event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, `payload`), and are not interchangeable. |
 | Use MiniMax direct Token Plan API. | MiniMax docs verify model `MiniMax-M2.7`, base URL `https://api.minimax.io/v1`, and env var `MINIMAX_API_KEY`. | Remove OpenRouter as the primary provider path. Provider config is verified in Phase 0 Design Lock (T00-007). |
 | Use AnyIO for Python concurrency. | Project global stack requires AnyIO; AnyIO docs verify task groups, memory object streams, semaphores, capacity limiters, locks, and thread offload. | Replace raw `asyncio` examples from the input plan with AnyIO equivalents during implementation. |
 | Use Pydantic v2 for event models. | Pydantic docs verify `BaseModel`, `model_validate`, `model_dump`, `Field(default_factory=...)`, `Literal`, and discriminated unions. | Event schemas should use Pydantic v2 and discriminated unions by event type. |
@@ -57,7 +57,7 @@ The runtime should evolve in three layers:
 2. In-process Python event bus: normalize events into typed Pydantic v2 envelopes and route them through AnyIO memory streams with explicit backpressure.
 3. Durable event backbone: persist normalized events to SQLite WAL with serialized writes, idempotency keys, read-only readers, and checkpoint policy.
 
-The event schema should be separate from `stk` command results. It can borrow `stk` conventions such as `schemaVersion` and structured error fields, but it needs event-specific fields including `event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, and `payload`.
+The event schema is deliberately separate from `stk` command-result envelopes. `stk` envelopes use `schemaVersion`, `ok`, `command`, `data`, `errors`, `warnings`, and `elapsed_ms`. Agent event envelopes use `event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, and `payload`. The two shapes are not interchangeable.
 
 Telemetry should be captured through an adapter that emits OpenTelemetry GenAI attributes for model operations while insulating the rest of the code from convention churn.
 
@@ -292,7 +292,7 @@ Verified `stk` command envelope fields (do not use for agent events):
 - `warnings`
 - `elapsed_ms`
 
-Agent event envelopes are **not** `stk` command-result envelopes. Agent events borrow some conventions (`schemaVersion`, structured error fields) but add event-specific fields: `event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, and `payload`.
+Agent event envelopes are **not** `stk` command-result envelopes. Agent event envelopes use distinct fields: `event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, and `payload`. The two shapes are not interchangeable.
 
 ### First vertical slice event selection
 
@@ -444,7 +444,7 @@ OpenTelemetry GenAI semantic conventions are at **Development** status. This mea
 - AC-005: WHEN an agent event is persisted, THE SYSTEM SHALL validate it against a Pydantic v2 event schema before writing.
 - AC-006: WHEN an event is appended to the durable log, THE SYSTEM SHALL use idempotency to prevent duplicate persisted events.
 - AC-007: WHILE using SQLite WAL, THE SYSTEM SHALL serialize writes and document local-host constraints.
-- AC-008: WHEN an event envelope borrows from `stk` conventions, THE SYSTEM SHALL distinguish it from `stk` command-result envelopes.
+- AC-008: Agent event envelopes SHALL use the implemented event fields (`event_id`, `event_type`, `producer`, `correlation_id`, `occurred_at`, `payload`) and SHALL NOT borrow `stk` command-result fields (`schemaVersion`, `ok`, `command`, `data`, `errors`, `warnings`, `elapsed_ms`).
 - AC-009: WHEN model telemetry is emitted, THE SYSTEM SHALL route GenAI attributes through a telemetry adapter.
 - AC-010: IF OpenTelemetry GenAI conventions change, THEN THE SYSTEM SHALL localize changes to the telemetry adapter where possible.
 - AC-011: WHEN artifact conflicts are detected, THE SYSTEM SHALL emit typed conflict events and require Validator or HITL resolution.
